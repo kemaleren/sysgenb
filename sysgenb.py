@@ -1,6 +1,7 @@
 from __future__ import division
 
 import os
+from cPickle import dump
 
 import numpy as np
 from scipy.stats import spearmanr
@@ -13,6 +14,7 @@ DATA_DIR = "../data"
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
 
+N_BOOTSTRAP = 100
 RATE = 0.5
 N_FOLDS = 3
 
@@ -34,14 +36,21 @@ def read_training_data():
     return genotype, expression, percent_present, scale_factor
 
 
-def read_gold_standard_data():
+def read_gold_standard_data(b=1):
     # NOTE: do not use this until we know the final model
-    genotype = read_data_file(os.path.join(
-        TEST_DIR, 'DREAM5_SysGenB3_TestGenotypeData.txt'))
-    expression = read_data_file(os.path.join(
-        TEST_DIR, 'DREAM5_SysGenB3_TestExpressionData.txt'))
+    base = 'DREAM5_SysGenB{}_'.format(b)
+    if b in (1, 3):
+        genotype = read_data_file(os.path.join(
+            TEST_DIR, base + 'TestGenotypeData.txt'))
+    else:
+        genotype = None
+    if b in (2, 3):
+        expression = read_data_file(os.path.join(
+            TEST_DIR, base + 'TestExpressionData.txt'))
+    else:
+        expression = None
     phenotype = read_data_file(os.path.join(
-        TEST_DIR, 'DREAM5_SysGenB3_GoldStandard.txt'))
+        TEST_DIR, base + 'GoldStandard.txt'))
     percent_present = phenotype[:, 0].ravel()
     scale_factor = phenotype[:, 1].ravel()
     return genotype, expression, percent_present, scale_factor
@@ -65,16 +74,17 @@ def make_data(genotype, expression):
     Returns the feature array and a list of feature names.
 
     """
+    genotype_names, expression_names = get_names()
+    return genotype, genotype_names
+
     # standardize expression
     m = expression.mean(axis=0)
     s = expression.std(axis=0, ddof=1)
     expression = (expression - m) / s
 
-    genotype_names, expression_names = get_names()
     feats = np.hstack((genotype, expression))
     names = genotype_names + expression_names
 
-    return genotype, genotype_names
     return feats, names
 
 
@@ -82,7 +92,7 @@ def make_rates(coefs):
     return (coefs != 0).sum(axis=0) / coefs.shape[0]
 
 
-def train_model(data, target, n_iter=10, rate=0.5):
+def train_model(data, target, n_iter, rate):
     """Bootstraps, trains ElasticNetCV model, selects features, and
     trains final linear regression model.
 
@@ -96,7 +106,7 @@ def train_model(data, target, n_iter=10, rate=0.5):
         sample_data = data[indices]
         sample_target = target[indices]
         model = ElasticNetCV(l1_ratio=[.1, .5, .7, .9, .95, .99, 1],
-                             max_iter=10000)
+                             max_iter=10000, n_jobs=4)
         model.fit(sample_data, sample_target)
         coefs.append(model.coef_)
     coefs = np.vstack(coefs)
@@ -108,14 +118,16 @@ def train_model(data, target, n_iter=10, rate=0.5):
     model.fit(data[:, selected], target)
 
     model_full = ElasticNetCV(l1_ratio=[.1, .5, .7, .9, .95, .99, 1],
-                              max_iter=10000)
+                              max_iter=10000, n_jobs=4)
     model_full.fit(data, target)
 
     return model_full, model, selected, coefs
 
 
 def do_fold(name, data, target, data_test, target_test):
-    model_full, model, selected, coefs = train_model(data, target, rate=RATE)
+    model_full, model, selected, coefs = train_model(data, target,
+                                                     n_iter=N_BOOTSTRAP,
+                                                     rate=RATE)
 
     # first try just elastic net
     preds = model_full.predict(data_test)
@@ -131,7 +143,7 @@ def do_fold(name, data, target, data_test, target_test):
     print "{} n_features : {} / {}, r: {}, p: {}".format(
         name, n_feats, len(selected), r, p)
 
-    return coefs, p
+    return model, selected, coefs, p
 
 
 def do_train():
@@ -156,12 +168,12 @@ def do_train():
         percent_present_test = percent_present[test_index]
         scale_factor_test = scale_factor[test_index]
 
-        coefs_percent, p_percent = do_fold(
+        _, _, coefs_percent, p_percent = do_fold(
             'percent present', data_train, percent_present_train, data_test,
             percent_present_test)
         all_coefs_percent.append(coefs_percent)
 
-        coefs_scale, p_scale = do_fold(
+        _, _, coefs_scale, p_scale = do_fold(
             'scale_factor', data_train, scale_factor_train, data_test,
             scale_factor_test)
         all_coefs_scale.append(coefs_scale)
@@ -175,9 +187,33 @@ def do_train():
     # save features and their selection rate
     df = pd.DataFrame(zip(feature_names, rates_percent, rates_scale),
                       columns=('feature', 'rate_percent_present',
-                               'rate_scale'), index=False)
-    df.to_csv('feature_selection_rates_train.csv')
+                               'rate_scale'))
+    df.to_csv('feature_selection_rates_train.csv', index=False)
+
+
+def do_test():
+    genotype, expression, percent_present_train, scale_factor_train = \
+        read_training_data()
+    data_train, feature_names = make_data(genotype, expression)
+
+    data_test, _, percent_present_test, scale_factor_test = \
+        read_gold_standard_data(b=1)
+
+    model_pp, selected_pp, r_pp, p_pp = \
+        do_fold('percent present', data_train, percent_present_train,
+                data_test, percent_present_test)
+    dump(model_pp, file('model_pp_test.pkl', 'wb'))
+    dump(selected_pp, file('features_pp_test.pkl', 'wb'))
+
+    model_scale, selected_scale, r_scale, p_scale = \
+        do_fold('scale factor', data_train, scale_factor_train,
+                data_test, scale_factor_test)
+    dump(model_scale, file('model_scale_test.pkl', 'wb'))
+    dump(selected_scale, file('features_scale_test.pkl', 'wb'))
+
+    score = -np.log(p_pp * p_scale)
+    print "overall score: {}".format(score)
 
 
 if __name__ == "__main__":
-    do_train()
+    do_test()
