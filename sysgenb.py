@@ -13,6 +13,9 @@ DATA_DIR = "../data"
 TRAIN_DIR = os.path.join(DATA_DIR, 'train')
 TEST_DIR = os.path.join(DATA_DIR, 'test')
 
+RATE = 0.5
+N_FOLDS = 3
+
 
 def read_data_file(f):
     data = pd.read_csv(f, sep='\t').dropna(axis=1)
@@ -79,7 +82,7 @@ def make_rates(coefs):
     return (coefs != 0).sum(axis=0) / coefs.shape[0]
 
 
-def train_model(data, target, n_iter=100, rate=0.5):
+def train_model(data, target, n_iter=10, rate=0.5):
     """Bootstraps, trains ElasticNetCV model, selects features, and
     trains final linear regression model.
 
@@ -88,8 +91,7 @@ def train_model(data, target, n_iter=100, rate=0.5):
     """
     coefs = []
     for i in range(n_iter):
-        if i % 20 == 0:
-            print "bootstrap iter {}".format(i)
+        print "bootstrap iter {}".format(i)
         indices = np.random.choice(len(data), size=len(data), replace=True)
         sample_data = data[indices]
         sample_target = target[indices]
@@ -99,28 +101,45 @@ def train_model(data, target, n_iter=100, rate=0.5):
         coefs.append(model.coef_)
     coefs = np.vstack(coefs)
     rate_selected = make_rates(coefs)
-    selected = np.nonzero(rate_selected >= rate)[0]
+    selected1 = np.nonzero(rate_selected >= rate)[0]
+    selected2 = np.argsort(rate_selected)[-50:]
+    selected = selected1 if len(selected1) < len(selected2) else selected2
     model = LinearRegression()
     model.fit(data[:, selected], target)
-    return model, selected, coefs
+
+    model_full = ElasticNetCV(l1_ratio=[.1, .5, .7, .9, .95, .99, 1],
+                              max_iter=10000)
+    model_full.fit(data, target)
+
+    return model_full, model, selected, coefs
 
 
 def do_fold(name, data, target, data_test, target_test):
-    model, selected, coefs = train_model(data, target)
-    preds = model.predict(data_test[:, selected])
-    n_feats = len(selected)
+    model_full, model, selected, coefs = train_model(data, target, rate=RATE)
+
+    # first try just elastic net
+    preds = model_full.predict(data_test)
+    n_feats = np.count_nonzero(model_full.coef_)
     r, p = spearmanr(target_test, preds)
-    print "{} n_features : {}, r: {}, p: {}".format(
-        name, n_feats, r, p)
+    print "{} full. n_features : {} / {}, r: {}, p: {}".format(
+        name, n_feats, data.shape[1], r, p)
+
+    # then linear model with selected features
+    preds = model.predict(data_test[:, selected])
+    n_feats = np.count_nonzero(model.coef_)
+    r, p = spearmanr(target_test, preds)
+    print "{} n_features : {} / {}, r: {}, p: {}".format(
+        name, n_feats, len(selected), r, p)
+
     return coefs, p
 
 
-if __name__ == "__main__":
+def do_train():
     genotype, expression, percent_present, scale_factor = \
         read_training_data()
     data, feature_names = make_data(genotype, expression)
 
-    kf = KFold(len(data), n_folds=3, random_state=0)
+    kf = KFold(len(data), n_folds=N_FOLDS, random_state=0)
 
     k = 0
 
@@ -156,7 +175,9 @@ if __name__ == "__main__":
     # save features and their selection rate
     df = pd.DataFrame(zip(feature_names, rates_percent, rates_scale),
                       columns=('feature', 'rate_percent_present',
-                               'rate_scale'))
-    df.to_csv('feature_selection_rates.csv')
+                               'rate_scale'), index=False)
+    df.to_csv('feature_selection_rates_train.csv')
 
-    # make biplots
+
+if __name__ == "__main__":
+    do_train()
