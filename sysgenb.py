@@ -79,7 +79,7 @@ def make_rates(coefs):
     return (coefs != 0).sum(axis=0) / coefs.shape[0]
 
 
-def train_model(data, target, n_iter=3, rate=0.5):
+def train_model(data, target, n_iter=100, rate=0.5):
     """Bootstraps, trains ElasticNetCV model, selects features, and
     trains final linear regression model.
 
@@ -88,7 +88,8 @@ def train_model(data, target, n_iter=3, rate=0.5):
     """
     coefs = []
     for i in range(n_iter):
-        print "bootstrap iter {}".format(i)
+        if i % 20 == 0:
+            print "bootstrap iter {}".format(i)
         indices = np.random.choice(len(data), size=len(data), replace=True)
         sample_data = data[indices]
         sample_target = target[indices]
@@ -119,7 +120,7 @@ if __name__ == "__main__":
         read_training_data()
     data, feature_names = make_data(genotype, expression)
 
-    kf = KFold(len(data), n_folds=2, random_state=0)
+    kf = KFold(len(data), n_folds=3, random_state=0)
 
     k = 0
 
